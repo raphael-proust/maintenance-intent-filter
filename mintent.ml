@@ -1,4 +1,15 @@
-(* couple helpers *)
+module Utils
+: sig
+  (* picks the n maximum (according the the comparison function argument) values
+     of a list,  *)
+  val list_nmaxes :
+    ('a -> 'a -> int)
+    -> int
+    -> 'a list
+    -> ('a * 'a list) list
+end
+= struct
+(* couple helper functions *)
 
 let rec insert_in_bin
   (cmp : 'a -> 'a -> int)
@@ -30,18 +41,22 @@ let () = assert begin
   && list_nmaxes Int.compare 1 [0;0;2;2] = [(2, [2;2])]
   && list_nmaxes Int.compare 2 [0;1;2;3;3;1;2;1] = [(2,[2;2]);(3,[3;3])]
 end
+end
 
 
 
 module M
 : sig
+
+  (* separators used in version strings and in intent strings *)
   type separator = Dot | Dash
+
   type atom = (* the part of an intent in brackets *)
-    | Last of int (**)
-    | Any
+    | Last of int (* (last n) is the n latest versions, (latest) is the latest version *)
     | Equal of int
   type 'atom t = (* an intent is a "list" of alternating atoms and separators *)
-    | (::) of 'atom * 'atom s
+    (* intentionally no Nil so that the list is not empty *)
+    | (::) of 'atom * 'atom s (* flip-flops between t and s to alternate atoms and separators *)
   and 'atom s =
     | []
     | (::) of separator * 'atom t
@@ -49,11 +64,13 @@ module M
   type intent = atom t
   type version = int t
 
+  (* basic "list" handling *)
   val catt : 'a t -> separator -> 'a t -> 'a t
   val ntht : 'a t -> int -> 'a
   val depth : 'a t -> int (* depth but not counting seps *)
-  val get : 'a t -> separator list -> [> `Some of 'a | `Unfit | `Too_short ]
+  val get : 'a t -> separator list -> [> `Some of 'a | `Unfit | `Too_short ] (* list ntht but checking separators as we descend *)
 
+  val intent_of_string : string -> intent
   val string_of_intent : intent -> string
   val version_of_string : string -> version
   val string_of_version : version -> string
@@ -64,7 +81,6 @@ end
 type separator = Dot | Dash
 type atom = (* the part of an intent in brackets *)
   | Last of int (**)
-  | Any
   | Equal of int
 type 'atom t = (* an intent is a "list" of alternating atoms and separators *)
   | (::) of 'atom * 'atom s
@@ -120,8 +136,8 @@ let rec string_of_t (p : 'a -> string) : 'a t -> string = function
 let string_of_intent : intent -> string =
   string_of_t (function
   | Last 1 -> "(latest)"
+  | Last n when n = max_int -> "(any)"
   | Last n -> "(last " ^ string_of_int n ^ ")"
-  | Any -> "(any)"
   | Equal i -> "("^ string_of_int i ^")" )
 let string_of_version : version -> string = string_of_t string_of_int
 
@@ -145,6 +161,25 @@ let version_of_string (v: string) : version =
   |> flattent
   |> mapt int_of_string
 
+let atom_of_string = function
+  | "(latest)" -> Last 1
+  | "(any)" -> Last max_int
+  | a ->
+      match int_of_string_opt a with
+      | Some n -> Equal n
+      | None ->
+          (* (last n) *)
+          if String.length a >= 8 && String.sub a 0 6 = "(last " && String.get a (String.length a - 1) = ')' then
+            Last (int_of_string (String.sub a 6 (String.length a - 6 - 1)))
+          else
+            failwith "invalid atom?"
+let intent_of_string (i: string) : intent =
+  i
+  |> split Dot
+  |> mapt (split Dash)
+  |> flattent
+  |> mapt atom_of_string
+
 let () = assert begin
   version_of_string "0.1" = [0; Dot; 1]
   && version_of_string "0.1.1" = [0; Dot; 1; Dot; 1]
@@ -155,7 +190,7 @@ end
 
 let nmaxes_versions seps n vs =
   List.map snd
-          (list_nmaxes
+          (Utils.list_nmaxes
             (fun v w ->
               match M.get v seps, M.get w seps with
               | `Some iv, `Some iw -> Int.compare iv iw
@@ -166,17 +201,20 @@ let nmaxes_versions seps n vs =
             n
             vs)
 
+(* main function: filtering versions based on intent *)
 let filter intent versions =
   let rec filter
-    (visited_separators: M.separator list)
-    (remaining_intent: M.intent)
-    (versions: M.version list)
+    (visited_separators: M.separator list) (* the separators already traversed in the intent *)
+    (remaining_intent: M.intent) (* the part of the intent not yet traversed, the recursive function descneds into the intent so this shrinks *)
+    (versions: M.version list) (* the list of versions *)
   : M.version list
   =
+    (* only keep versions with the seen separators (eliminate the ones where
+       dashes and dots have different patterns for the intent and the version) *)
     let versions = List.filter (fun v -> M.get v visited_separators <> `Unfit) versions in
     match remaining_intent with
-    | [Any] -> versions
     | [Equal i] ->
+        (* just plain old list filter *)
         List.filter
           (fun v ->
             match M.get v visited_separators with
@@ -184,14 +222,8 @@ let filter intent versions =
             | `Too_short -> false
             | `Unfit -> assert false)
           versions
-    | [Last n] -> List.flatten ( nmaxes_versions visited_separators n versions )
-    | Any :: sep :: intent ->
-        let vss =
-          (* sorting into buckets of same atom: max-int to mimic "Any" *)
-          nmaxes_versions visited_separators Int.max_int versions
-        in
-        List.concat_map (filter (visited_separators @ [sep]) intent) vss
     | Equal i :: sep :: intent ->
+        (* plain old list filter and then descend recursively deeper into the intent *)
         let vs =
           List.filter
             (fun v ->
@@ -202,18 +234,25 @@ let filter intent versions =
             versions
         in
         filter (visited_separators @ [sep]) intent vs
+    | [Last n] ->
+        (* keeping the last n versions only, the flatten is because nmaxes sorts into buckets with different classes of versions *)
+        List.flatten ( nmaxes_versions visited_separators n versions )
     | Last n :: sep :: intent ->
+        (* sort into buckets of dfifferent classes of versions, and then for each bucket (separately) apply the remaining of the intent *)
         let vss = nmaxes_versions visited_separators n versions in
         List.concat_map (filter (visited_separators @ [sep]) intent) vss
   in
   filter [] intent versions
 
 
+(* a few basic tests *)
+
 let ( == ) xs ys = List.sort compare xs = List.sort compare ys
 let check i vs ws =
+  let i = M.intent_of_string i in
   let got = filter i (List.map M.version_of_string vs) in
   let exp = List.map M.version_of_string ws in
-  if got = exp then true else begin
+  if got == exp then true else begin
     Format.eprintf "Got [%s]\nExpected [%s]\n%!"
       (String.concat " ; " @@ List.map M.string_of_version got)
       (String.concat " ; " @@ List.map M.string_of_version exp)
@@ -221,13 +260,12 @@ let check i vs ws =
     false
   end
 
-let () = assert ( check [Any] [] [] )
-let () = assert ( check [Equal 1] [] [] )
-let () = assert ( check [Last 1] [] [] )
+let () = assert ( check "1" [] [] )
+let () = assert ( check "(last 1)" [] [] )
 
-let () = assert ( check [Any] (["0.0.1"; "0.1"; "0.3-1"]) (["0.0.1"; "0.1"; "0.3-1"]) )
-let () = assert ( check [Any; Dot; Equal 1] (["0.0.1"; "0.1"; "0.3-1"]) (["0.1"]) )
+let () = assert ( check "(any)" (["0.0.1"; "0.1"; "0.3-1"]) (["0.0.1"; "0.1"; "0.3-1"]) )
+let () = assert ( check "(any).1" (["0.0.1"; "0.1"; "0.3-1"]) (["0.1"]) )
 
-let () = assert ( check [Any; Dot; Last 1] ["0.0"; "0.1"; "0.3"] ["0.3"] )
-let () = assert ( check [Any; Dot; Last 1; Dot; Last 1] ["0.0.1"; "0.1"; "0.3"] ["0.3"] )
-let () = assert ( check [Any; Dot; Last 2] ["0.0.1"; "0.1"; "0.3"] ["0.1"; "0.3"] )
+let () = assert ( check "(any).(latest)" ["0.0"; "0.1"; "0.3"] ["0.3"] )
+let () = assert ( check "(any).(latest).(latest)" ["0.0.1"; "0.1"; "0.3"] ["0.3"] )
+let () = assert ( check "(any).(last 2)" ["0.0.1"; "0.1"; "0.3"] ["0.1"; "0.3"] )
