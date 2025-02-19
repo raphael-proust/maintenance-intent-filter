@@ -1,3 +1,5 @@
+[@@@warning "-30"]
+
 module Utils
 : sig
   (* picks the n maximum (according the the comparison function argument) values
@@ -164,6 +166,7 @@ let version_of_string (v: string) : version =
 let atom_of_string = function
   | "(latest)" -> Last 1
   | "(any)" -> Last max_int
+  | "(none)" -> Last 0
   | a ->
       match int_of_string_opt a with
       | Some n -> Equal n

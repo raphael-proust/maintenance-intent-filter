@@ -1,0 +1,4 @@
+(executable
+  (name maintenance_intent)
+  (public_name maintenance-intent)
+  (libraries logs bos logs.fmt fmt.tty cmdliner fmt.cli logs.cli opam-format opam-state))
